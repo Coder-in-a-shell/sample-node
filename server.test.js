@@ -34,3 +34,36 @@ test('Server healthcheck returns 200 OK', async (t) => {
         });
     });
 });
+
+test('Server returns status info on /api/status', async (t) => {
+    const { server } = require('./server.js');
+
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    return new Promise((resolve, reject) => {
+        http.get(`http://localhost:${port}/api/status`, (res) => {
+            try {
+                assert.strictEqual(res.statusCode, 200, 'Status should be 200');
+                assert.strictEqual(res.headers['content-type'], 'application/json', 'Content type should be JSON');
+
+                let data = '';
+                res.on('data', chunk => { data += chunk; });
+                res.on('end', () => {
+                    const parsed = JSON.parse(data);
+                    assert.strictEqual(parsed.status, 'up', 'API should be up');
+                    assert.strictEqual(parsed.version, '1.1.0', 'Version should match');
+
+                    server.close();
+                    resolve();
+                });
+            } catch (err) {
+                server.close();
+                reject(err);
+            }
+        }).on('error', (err) => {
+            server.close();
+            reject(err);
+        });
+    });
+});
