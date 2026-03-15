@@ -1,0 +1,63 @@
+name: Production Grade CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  # PHASE 1: Continuous Integration (Tests & Validation)
+  ci-tests:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run Unit Tests
+        run: npm test
+
+  # PHASE 2: Build Artifact & Deploy to Dev
+  build-and-deploy-dev:
+    needs: ci-tests
+    runs-on: self-hosted
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Build Secure Image inside Minikube
+        run: |
+          minikube image build -t node-app:${{ github.sha }} .
+
+      - name: Apply Kubernetes Configurations (Dev)
+        run: |
+          sed -i "s|REPLACE_IMAGE|node-app:${{ github.sha }}|g" k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml -n dev
+          kubectl apply -f k8s/deployment.yaml -n dev
+
+      - name: Verify Dev Deployment Health
+        run: |
+          # This command will fail the pipeline if the pods crash loop!
+          kubectl rollout status deployment/node-app -n dev --timeout=90s
+
+  # PHASE 3: Deploy to Production (With Manual Approval Gate)
+  deploy-prod:
+    needs: build-and-deploy-dev
+    runs-on: self-hosted
+    environment: production # Triggers your required reviewers
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Apply Kubernetes Configurations (Prod)
+        run: |
+          sed -i "s|REPLACE_IMAGE|node-app:${{ github.sha }}|g" k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml -n prod
+          kubectl apply -f k8s/deployment.yaml -n prod
+
+      - name: Verify Prod Deployment Health
+        run: |
+          kubectl rollout status deployment/node-app -n prod --timeout=90s
