@@ -58,7 +58,7 @@ jobs:
 
       - name: Apply Kubernetes Configurations (Prod)
         run: |
-          sed -i "s|REPLACE_IMAGE|node-app:${{ github.sha }}|g" k8s/deployment.yaml
+          sed -i "s|REPLACE_IMAGE|${{ secrets.DOCKER_USERNAME }}/node-app:${{ github.sha }}|g" k8s/deployment.yaml
           kubectl apply -f k8s/service.yaml -n prod
           kubectl apply -f k8s/deployment.yaml -n prod
 
@@ -66,4 +66,3 @@ jobs:
         run: |
           kubectl rollout status deployment/node-app -n prod --timeout=90s
 
-          
