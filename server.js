@@ -14,6 +14,11 @@ const server = http.createServer((req, res) => {
         return res.end('OK');
     }
 
+    if (req.url === '/api/status') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        return res.end(JSON.stringify({ status: 'up', version: '1.1.0' }));
+    }
+
     res.writeHead(200);
     res.end('Hello! The new feature branch has successfully reached production!');
 });
