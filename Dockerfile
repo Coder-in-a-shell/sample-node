@@ -13,6 +13,11 @@ USER node
 
 # Copy files and set correct permissions
 COPY --chown=node:node package*.json ./
+
+# Install exact dependencies for production (requires package-lock.json to exist if we had dependencies)
+# We use npm install --omit=dev because npm ci requires package-lock.json and this simple sample may not have it yet.
+RUN npm install --omit=dev
+
 COPY --chown=node:node server.js ./
 
 # Expose the port the app runs on

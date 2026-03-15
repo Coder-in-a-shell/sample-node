@@ -1,0 +1,85 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+    tags: [ "v*.*.*" ]
+
+jobs:
+  # ---------------------------------------------------------
+  # 1. CI PIPELINE (Runs on every push)
+  # ---------------------------------------------------------
+  ci-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run Unit Tests
+        run: npm test
+
+  build-and-push:
+    needs: ci-tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Log in to Docker Hub
+        run: echo "${{ secrets.DOCKER_TOKEN }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+      - name: Build and Push Docker Image
+        run: |
+          IMAGE_TAG=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+          docker build -t ${{ secrets.DOCKER_USERNAME }}/node-app:${IMAGE_TAG} .
+          docker push ${{ secrets.DOCKER_USERNAME }}/node-app:${IMAGE_TAG}
+
+  # ---------------------------------------------------------
+  # 2. DEPLOY TO DEV & STAGING (Only on main branch)
+  # ---------------------------------------------------------
+  deploy-dev:
+    if: github.ref_type == 'branch' && github.ref_name == 'main'
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Apply to DEV using Kustomize
+        run: |
+          cd k8s/overlays/dev
+          kustomize edit set image REPLACE_IMAGE=${{ secrets.DOCKER_USERNAME }}/node-app:${{ github.sha }}
+          kubectl apply -k .
+          kubectl rollout status deployment/dev-node-app -n dev --timeout=90s
+
+  deploy-staging:
+    if: github.ref_type == 'branch' && github.ref_name == 'main'
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Apply to STAGING using Kustomize
+        run: |
+          cd k8s/overlays/staging
+          kustomize edit set image REPLACE_IMAGE=${{ secrets.DOCKER_USERNAME }}/node-app:${{ github.sha }}
+          kubectl apply -k .
+          kubectl rollout status deployment/staging-node-app -n staging --timeout=90s
+
+  # ---------------------------------------------------------
+  # 3. THE PRODUCTION GATE (Only on semantic version tags)
+  # ---------------------------------------------------------
+  deploy-prod:
+    if: github.ref_type == 'tag'
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment: production # Triggers the manual GitHub UI Approval
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Apply to PROD using Kustomize
+        run: |
+          cd k8s/overlays/prod
+          kustomize edit set image REPLACE_IMAGE=${{ secrets.DOCKER_USERNAME }}/node-app:${{ github.ref_name }}
+          kubectl apply -k .
+          kubectl rollout status deployment/prod-node-app -n prod --timeout=90s
