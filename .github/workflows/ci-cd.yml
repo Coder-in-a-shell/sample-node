@@ -1,4 +1,4 @@
-name: CI/CD Pipeline
+name: Enterprise CI/CD Pipeline
 
 on:
   push:
@@ -8,56 +8,97 @@ on:
     branches: [ "main" ]
 
 jobs:
-  # ---------------------------------------------------------
-  # 1. CI PIPELINE (Runs on every push and PR)
-  # ---------------------------------------------------------
+  # =================================================================================
+  # 1. CONTINUOUS INTEGRATION: Code Quality & Security
+  # =================================================================================
   ci-tests:
+    name: Lint, Test & SAST
     runs-on: self-hosted
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
+
       - name: Install Dependencies
         run: npm ci
+
+      # Placeholder for Linting (add your script to package.json, e.g. "lint": "eslint .")
+      # - name: Run Linter
+      #   run: npm run lint
+
       - name: Run Unit Tests
         run: npm test
 
+      - name: Run NPM Audit (Dependency Scanning)
+        run: npm audit --audit-level=high
+
+      - name: Run Trivy SAST Vulnerability Scanner targeting source code
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+
+  # =================================================================================
+  # 2. CONTAINER BUILD & REGISTRY PUBLISH
+  # =================================================================================
   build-and-push:
+    name: Build & Scan Container Image
     if: github.event_name == 'push'
     needs: ci-tests
     runs-on: self-hosted
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Image locally
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          load: true # Load into the local docker daemon to scan before pushing
+          tags: ${{ secrets.DOCKER_USERNAME }}/node-app:local-scan
+
+      - name: Run Trivy Vulnerability Scanner on Image
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: '${{ secrets.DOCKER_USERNAME }}/node-app:local-scan'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_TOKEN }}
-      - name: Build and Push Docker Image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: true
-          tags: ${{ secrets.DOCKER_USERNAME }}/node-app:${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
 
-  # ---------------------------------------------------------
-  # 2. DEPLOY TO DEV & STAGING (Only on main branch)
-  # ---------------------------------------------------------
+      - name: Tag and Push Image to Docker Hub
+        run: |
+          IMAGE_TAG=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+          docker tag ${{ secrets.DOCKER_USERNAME }}/node-app:local-scan ${{ secrets.DOCKER_USERNAME }}/node-app:${IMAGE_TAG}
+          docker push ${{ secrets.DOCKER_USERNAME }}/node-app:${IMAGE_TAG}
+
+  # =================================================================================
+  # 3. DEVELOPMENT ENVIRONMENT (Automatic)
+  # =================================================================================
   deploy-dev:
+    name: Deploy to DEV
     if: github.ref_type == 'branch' && github.ref_name == 'main'
     needs: build-and-push
-    runs-on: self-hosted
     concurrency: dev
+    runs-on: self-hosted
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
       - name: Apply to DEV using Kustomize
         run: |
           cd k8s/overlays/dev
@@ -65,14 +106,28 @@ jobs:
           kubectl apply -k .
           kubectl rollout status deployment/dev-node-app -n dev --timeout=90s
 
-  deploy-staging:
-    if: github.ref_type == 'branch' && github.ref_name == 'main'
+  test-dev:
+    name: Integration Tests (DEV)
     needs: deploy-dev
     runs-on: self-hosted
+    steps:
+      - name: Run Integration Tests
+        run: echo "Running Integration Tests against DEV environment..."
+        # Add actual integration test command (e.g., npm run test:integration)
+
+  # =================================================================================
+  # 4. STAGING ENVIRONMENT (Automatic after DEV)
+  # =================================================================================
+  deploy-staging:
+    name: Deploy to STAGING
+    if: github.ref_type == 'branch' && github.ref_name == 'main'
+    needs: test-dev
     concurrency: staging
+    runs-on: self-hosted
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
       - name: Apply to STAGING using Kustomize
         run: |
           cd k8s/overlays/staging
@@ -80,21 +135,45 @@ jobs:
           kubectl apply -k .
           kubectl rollout status deployment/staging-node-app -n staging --timeout=90s
 
-  # ---------------------------------------------------------
-  # 3. THE PRODUCTION GATE (Only on semantic version tags)
-  # ---------------------------------------------------------
+  test-staging:
+    name: E2E & Load Tests (STAGING)
+    needs: deploy-staging
+    runs-on: self-hosted
+    steps:
+      - name: Run End-to-End (E2E) Tests
+        run: echo "Running E2E UI Tests (Playwright/Cypress) against STAGING..."
+        # Add actual e2e test command
+
+      - name: Run Performance/Load Tests
+        run: echo "Running Load Tests (k6/Artillery) against STAGING..."
+        # Add actual load test command
+
+  # =================================================================================
+  # 5. PRODUCTION ENVIRONMENT (Manual Approval & Tag Based)
+  # =================================================================================
   deploy-prod:
+    name: Deploy to PROD
     if: github.ref_type == 'tag'
     needs: build-and-push
-    runs-on: self-hosted
-    environment: production # Triggers the manual GitHub UI Approval
     concurrency: production
+    runs-on: self-hosted
+    environment: production # Triggers manual approval gating in GitHub
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+
       - name: Apply to PROD using Kustomize
         run: |
           cd k8s/overlays/prod
           kustomize edit set image REPLACE_IMAGE=${{ secrets.DOCKER_USERNAME }}/node-app:${{ github.ref_name }}
           kubectl apply -k .
           kubectl rollout status deployment/prod-node-app -n prod --timeout=90s
+
+  test-prod:
+    name: Smoke Tests (PROD)
+    needs: deploy-prod
+    runs-on: self-hosted
+    steps:
+      - name: Run Production Smoke Tests
+        run: echo "Running Smoke Tests against Live Production..."
+        # Add actual smoke test script/curl commands
